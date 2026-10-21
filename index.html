@@ -19,18 +19,17 @@
     -webkit-tap-highlight-color: transparent; user-select: none;
   }
   #out {
-    color: var(--text);
-    width: 100%; max-height: 100%; overflow-y: auto; box-sizing: border-box;
+    color: var(--text); width: 100%; max-height: 100%; overflow-y: auto; box-sizing: border-box;
     padding: 56px 28px; text-align: center;
-    font-size: clamp(28px, 6vw, 64px); line-height: 1.3; font-weight: 500;
-    word-break: break-word;
+    font-size: clamp(28px, 6vw, 64px); line-height: 1.3; font-weight: 500; word-break: break-word;
   }
+  #out.hint { font-size: clamp(20px, 4.5vw, 36px); color: var(--ui); }
   #bar {
     position: fixed; top: env(safe-area-inset-top, 0); left: 0; right: 0;
     display: flex; justify-content: space-between; align-items: center;
     padding: 12px 16px; font-size: 13px; color: var(--ui);
   }
-  #lang { background: none; border: 1px solid var(--ui-line); color: var(--ui); border-radius: 8px; padding: 6px 12px; font: inherit; cursor: pointer; }
+  #lang { background: none; border: 1px solid var(--ui-line); color: var(--ui); border-radius: 8px; padding: 8px 14px; font: inherit; font-size: 15px; cursor: pointer; }
   #dot { width: 10px; height: 10px; border-radius: 50%; background: var(--ui-line); display: inline-block; margin-right: 8px; }
   #dot.on { background: var(--on); }
   #msg.err { color: #d9704f; }
@@ -52,36 +51,49 @@
   const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
 
   const CODES = { ru: 'ru-RU', es: 'es-ES' };
+  const SAY = { ru: 'Говорите по-русски', es: 'Говорите по-испански' };
   let from = 'ru', to = 'es';
   let listening = false, rec = null;
   let finalBuf = '', lastTime = 0, timer = null, seq = 0;
   let current = '', hist = [], viewIdx = -1;
-  function archive() { if (current) { hist.push(current); if (hist.length > 50) hist.shift(); current = ''; } }
   const translators = {};
 
+  function archive() { if (current) { hist.push(current); if (hist.length > 50) hist.shift(); current = ''; } }
   function status(t, err) { msg.textContent = t; msg.classList.toggle('err', !!err); }
+  function show(t, hint) { out.classList.toggle('hint', !!hint); out.textContent = t; }
 
-  if (!SR) { status('нужен Chrome / Edge / Safari', true); }
+  if (!SR) status('нужен Safari или Chrome', true);
 
-  async function getTranslator() {
+  // ---------- Перевод ----------
+  async function viaChrome(text) {
     if (!('Translator' in self)) return null;
     const key = from + to;
-    if (translators[key] !== undefined) return translators[key];
-    try {
-      const a = await Translator.availability({ sourceLanguage: from, targetLanguage: to });
-      if (a === 'unavailable') return (translators[key] = null);
-      return (translators[key] = await Translator.create({ sourceLanguage: from, targetLanguage: to }));
-    } catch (e) { return (translators[key] = null); }
+    if (translators[key] === undefined) {
+      try {
+        const a = await Translator.availability({ sourceLanguage: from, targetLanguage: to });
+        translators[key] = a === 'unavailable' ? null : await Translator.create({ sourceLanguage: from, targetLanguage: to });
+      } catch (e) { translators[key] = null; }
+    }
+    return translators[key] ? await translators[key].translate(text) : null;
   }
-
-  async function translate(text) {
-    const tr = await getTranslator();
-    if (tr) return await tr.translate(text);
-    const url = 'https://api.mymemory.translated.net/get?q=' + encodeURIComponent(text.slice(0, 450)) +
-                '&langpair=' + from + '|' + to;
-    const r = await fetch(url);
+  async function viaGoogle(text) {
+    const r = await fetch('https://translate.googleapis.com/translate_a/single?client=gtx&dt=t&sl=' + from +
+      '&tl=' + to + '&q=' + encodeURIComponent(text));
     const d = await r.json();
+    return d[0].map(x => x[0]).join('');
+  }
+  async function viaMyMemory(text) {
+    const r = await fetch('https://api.mymemory.translated.net/get?q=' + encodeURIComponent(text.slice(0, 450)) +
+      '&langpair=' + from + '|' + to);
+    const d = await r.json();
+    if (d.responseStatus != 200) throw new Error('mm');
     return d.responseData.translatedText;
+  }
+  async function translate(text) {
+    for (const fn of [viaChrome, viaGoogle, viaMyMemory]) {
+      try { const res = await fn(text); if (res) return res; } catch (e) {}
+    }
+    throw new Error('no translator');
   }
 
   function schedule(text) {
@@ -90,19 +102,23 @@
       const my = ++seq;
       try {
         const res = await translate(text);
-        if (my === seq) { current = res; viewIdx = -1; out.textContent = res; out.scrollTop = out.scrollHeight; status('слушаю…'); }
-      } catch (e) { status('перевод не удался', true); }
-    }, 450);
+        if (my === seq) { current = res; viewIdx = -1; show(res); out.scrollTop = out.scrollHeight; if (listening) status('слушаю…'); }
+      } catch (e) { status('перевод не удался — нет сети?', true); }
+    }, 400);
   }
 
+  // ---------- Распознавание (короткие сессии с автоперезапуском) ----------
   function startRec() {
-    rec = new SR();
-    rec.lang = CODES[from];
-    rec.continuous = true;
-    rec.interimResults = true;
-    rec.onresult = (ev) => {
+    if (!SR) return;
+    const r = new SR();
+    rec = r;
+    r.lang = CODES[from];
+    r.continuous = false;
+    r.interimResults = true;
+    r.maxAlternatives = 1;
+    r.onresult = (ev) => {
       const now = Date.now();
-      if (finalBuf && now - lastTime > 5000) { finalBuf = ''; archive(); } // новая фраза после паузы
+      if (finalBuf && now - lastTime > 5000) { finalBuf = ''; archive(); }
       lastTime = now;
       let interim = '';
       for (let i = ev.resultIndex; i < ev.results.length; i++) {
@@ -112,57 +128,57 @@
       const full = (finalBuf + interim).trim();
       if (full) schedule(full);
     };
-    rec.onerror = (e) => {
+    r.onerror = (e) => {
       if (e.error === 'not-allowed' || e.error === 'service-not-allowed') {
-        status('микрофон запрещён — разрешите в браузере', true); stop();
+        status('нет доступа: микрофон или диктовка выключены', true); stop();
       } else if (e.error === 'audio-capture') { status('микрофон не найден', true); stop(); }
       else if (e.error === 'network') status('нет сети для распознавания', true);
+      else if (e.error !== 'no-speech' && e.error !== 'aborted') status('ошибка: ' + e.error, true);
     };
-    rec.onend = () => { if (listening) setTimeout(() => { try { rec.start(); } catch (e) {} }, 150); };
-    rec.start();
+    r.onend = () => {
+      if (!listening || rec !== r) return;
+      setTimeout(() => {
+        if (!listening || rec !== r) return;
+        try { r.start(); } catch (e) { startRec(); }
+      }, 200);
+    };
+    try { r.start(); } catch (e) { status('не удалось запустить микрофон', true); }
   }
+  function killRec() {
+    const old = rec; rec = null;
+    if (old) { old.onend = null; old.onerror = null; old.onresult = null; try { old.abort(); } catch (e) {} }
+  }
+  function restartRec() { killRec(); setTimeout(() => { if (listening) startRec(); }, 300); }
 
   function start() {
     if (!SR) return;
     listening = true; dot.classList.add('on'); status('слушаю…');
-    getTranslator(); // прогрев (нужен жест пользователя)
     startRec();
   }
   function stop() {
     listening = false; dot.classList.remove('on'); status('удерживайте экран');
-    if (rec) { rec.onend = null; rec.stop(); }
+    killRec();
   }
 
+  // ---------- Жесты ----------
   function showPrev() {
     if (viewIdx === -1) viewIdx = current ? hist.length - 1 : hist.length - 2;
     else if (viewIdx > 0) viewIdx--;
-    if (viewIdx >= 0 && hist[viewIdx] !== undefined) out.textContent = hist[viewIdx];
-    else viewIdx = -1;
+    if (viewIdx >= 0 && hist[viewIdx] !== undefined) show(hist[viewIdx]); else viewIdx = -1;
   }
   function newSentence() {
     archive(); finalBuf = ''; viewIdx = -1; seq++; clearTimeout(timer);
-    out.textContent = '';
-    if (listening) {
-      status('новое предложение');
-      if (rec) { rec.onend = null; try { rec.abort(); } catch (e) {} }
-      startRec();
-      setTimeout(() => { if (listening) status('слушаю…'); }, 900);
-    } else start();
+    show('');
+    if (listening) { status('новое предложение'); restartRec(); setTimeout(() => { if (listening) status('слушаю…'); }, 900); }
+    else start();
   }
 
-  // Управление: 1 тап = новое предложение, 2 тапа = предыдущий перевод,
-  // удержание 0,6 с = микрофон вкл/выкл
   let lastTap = 0, tapTimer = null, holdTimer = null, held = false;
   document.body.addEventListener('contextmenu', (e) => e.preventDefault());
   document.body.addEventListener('pointerdown', (e) => {
     if (e.target === langBtn) return;
-    held = false;
-    clearTimeout(holdTimer);
-    holdTimer = setTimeout(() => {
-      held = true;
-      clearTimeout(tapTimer); lastTap = 0;
-      listening ? stop() : start();
-    }, 600);
+    held = false; clearTimeout(holdTimer);
+    holdTimer = setTimeout(() => { held = true; clearTimeout(tapTimer); lastTap = 0; listening ? stop() : start(); }, 600);
   });
   document.body.addEventListener('pointerup', (e) => {
     if (e.target === langBtn) return;
@@ -170,17 +186,20 @@
     if (held) { held = false; return; }
     const now = Date.now();
     if (now - lastTap < 320) { clearTimeout(tapTimer); lastTap = 0; showPrev(); return; }
-    lastTap = now;
-    tapTimer = setTimeout(newSentence, 320);
+    lastTap = now; tapTimer = setTimeout(newSentence, 320);
   });
   document.body.addEventListener('pointercancel', () => { clearTimeout(holdTimer); held = false; });
 
+  // ---------- Смена языка ----------
   langBtn.addEventListener('click', (e) => {
     e.stopPropagation();
     [from, to] = [to, from];
     langBtn.textContent = from.toUpperCase() + ' → ' + to.toUpperCase();
-    archive(); finalBuf = ''; out.textContent = ''; seq++;
-    if (listening) { rec.onend = null; rec.stop(); startRec(); }
+    archive(); finalBuf = ''; seq++; clearTimeout(timer);
+    const hint = SAY[from];
+    show(hint, true);
+    setTimeout(() => { if (out.textContent === hint) show(''); }, 1800);
+    if (listening) restartRec();
   });
 })();
 </script>
