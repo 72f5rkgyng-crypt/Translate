@@ -33,14 +33,24 @@
   #dot { width: 10px; height: 10px; border-radius: 50%; background: var(--ui-line); display: inline-block; margin-right: 8px; }
   #dot.on { background: var(--on); }
   #msg.err { color: #d9704f; }
+  #mic {
+    position: fixed; left: 50%; transform: translateX(-50%);
+    bottom: calc(24px + env(safe-area-inset-bottom, 0px));
+    width: 68px; height: 68px; border-radius: 50%; padding: 0;
+    background: none; border: 2px solid var(--text); color: var(--text);
+    display: flex; align-items: center; justify-content: center; cursor: pointer;
+  }
+  #mic svg { width: 28px; height: 28px; fill: currentColor; }
+  #mic.on { background: var(--text); color: #000; }
 </style>
 </head>
 <body>
 <div id="bar">
   <button id="lang">RU → ES</button>
-  <span><span id="dot"></span><span id="msg">удерживайте экран</span></span>
+  <span><span id="dot"></span><span id="msg">микрофон выключен</span></span>
 </div>
 <div id="out"></div>
+<button id="mic" aria-label="Микрофон"><svg viewBox="0 0 24 24"><path d="M12 15a3.5 3.5 0 0 0 3.5-3.5v-6a3.5 3.5 0 0 0-7 0v6A3.5 3.5 0 0 0 12 15zm6-3.5a1 1 0 1 0-2 0 4 4 0 0 1-8 0 1 1 0 1 0-2 0 6 6 0 0 0 5 5.9V20H9.5a1 1 0 1 0 0 2h5a1 1 0 1 0 0-2H13v-2.6a6 6 0 0 0 5-5.9z"/></svg></button>
 
 <script>
 (function () {
@@ -48,6 +58,7 @@
   const msg = document.getElementById('msg');
   const dot = document.getElementById('dot');
   const langBtn = document.getElementById('lang');
+  const micBtn = document.getElementById('mic');
   const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
 
   const CODES = { ru: 'ru-RU', es: 'es-ES' };
@@ -152,11 +163,11 @@
 
   function start() {
     if (!SR) return;
-    listening = true; dot.classList.add('on'); status('слушаю…');
+    listening = true; dot.classList.add('on'); micBtn.classList.add('on'); status('слушаю…');
     startRec();
   }
   function stop() {
-    listening = false; dot.classList.remove('on'); status('удерживайте экран');
+    listening = false; dot.classList.remove('on'); micBtn.classList.remove('off'); micBtn.classList.remove('on'); status('микрофон выключен');
     killRec();
   }
 
@@ -170,25 +181,25 @@
     archive(); finalBuf = ''; viewIdx = -1; seq++; clearTimeout(timer);
     show('');
     if (listening) { status('новое предложение'); restartRec(); setTimeout(() => { if (listening) status('слушаю…'); }, 900); }
-    else start();
   }
 
-  let lastTap = 0, tapTimer = null, holdTimer = null, held = false;
+  // 1 тап по экрану = новое предложение; 2 тапа = предыдущее предложение + микрофон выключается.
+  // Микрофон включается и выключается кнопкой внизу.
+  let lastTap = 0, tapTimer = null;
+  micBtn.addEventListener('click', (e) => { e.stopPropagation(); listening ? stop() : start(); });
   document.body.addEventListener('contextmenu', (e) => e.preventDefault());
-  document.body.addEventListener('pointerdown', (e) => {
-    if (e.target === langBtn) return;
-    held = false; clearTimeout(holdTimer);
-    holdTimer = setTimeout(() => { held = true; clearTimeout(tapTimer); lastTap = 0; listening ? stop() : start(); }, 600);
-  });
   document.body.addEventListener('pointerup', (e) => {
-    if (e.target === langBtn) return;
-    clearTimeout(holdTimer);
-    if (held) { held = false; return; }
+    if (e.target.closest('button')) return;
     const now = Date.now();
-    if (now - lastTap < 320) { clearTimeout(tapTimer); lastTap = 0; showPrev(); return; }
+    if (now - lastTap < 320) {
+      clearTimeout(tapTimer); lastTap = 0;
+      clearTimeout(timer); seq++;
+      if (listening) stop();
+      showPrev();
+      return;
+    }
     lastTap = now; tapTimer = setTimeout(newSentence, 320);
   });
-  document.body.addEventListener('pointercancel', () => { clearTimeout(holdTimer); held = false; });
 
   // ---------- Смена языка ----------
   langBtn.addEventListener('click', (e) => {
