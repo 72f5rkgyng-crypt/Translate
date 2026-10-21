@@ -1,0 +1,188 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="Переводчик">
+<meta name="theme-color" content="#000000">
+<title>Переводчик</title>
+<style>
+  :root { --text: #5c5c5c; --ui: #444; --ui-line: #2a2a2a; --on: #2f7a4d; }
+  html, body { height: 100%; margin: 0; background: #000; color: var(--text); overflow: hidden; touch-action: manipulation; -webkit-touch-callout: none; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+    display: flex; align-items: center; justify-content: center;
+    padding: env(safe-area-inset-top, 0) 0 env(safe-area-inset-bottom, 0);
+    -webkit-tap-highlight-color: transparent; user-select: none;
+  }
+  #out {
+    color: var(--text);
+    width: 100%; max-height: 100%; overflow-y: auto; box-sizing: border-box;
+    padding: 56px 28px; text-align: center;
+    font-size: clamp(28px, 6vw, 64px); line-height: 1.3; font-weight: 500;
+    word-break: break-word;
+  }
+  #bar {
+    position: fixed; top: env(safe-area-inset-top, 0); left: 0; right: 0;
+    display: flex; justify-content: space-between; align-items: center;
+    padding: 12px 16px; font-size: 13px; color: var(--ui);
+  }
+  #lang { background: none; border: 1px solid var(--ui-line); color: var(--ui); border-radius: 8px; padding: 6px 12px; font: inherit; cursor: pointer; }
+  #dot { width: 10px; height: 10px; border-radius: 50%; background: var(--ui-line); display: inline-block; margin-right: 8px; }
+  #dot.on { background: var(--on); }
+  #msg.err { color: #d9704f; }
+</style>
+</head>
+<body>
+<div id="bar">
+  <button id="lang">RU → ES</button>
+  <span><span id="dot"></span><span id="msg">удерживайте экран</span></span>
+</div>
+<div id="out"></div>
+
+<script>
+(function () {
+  const out = document.getElementById('out');
+  const msg = document.getElementById('msg');
+  const dot = document.getElementById('dot');
+  const langBtn = document.getElementById('lang');
+  const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+
+  const CODES = { ru: 'ru-RU', es: 'es-ES' };
+  let from = 'ru', to = 'es';
+  let listening = false, rec = null;
+  let finalBuf = '', lastTime = 0, timer = null, seq = 0;
+  let current = '', hist = [], viewIdx = -1;
+  function archive() { if (current) { hist.push(current); if (hist.length > 50) hist.shift(); current = ''; } }
+  const translators = {};
+
+  function status(t, err) { msg.textContent = t; msg.classList.toggle('err', !!err); }
+
+  if (!SR) { status('нужен Chrome / Edge / Safari', true); }
+
+  async function getTranslator() {
+    if (!('Translator' in self)) return null;
+    const key = from + to;
+    if (translators[key] !== undefined) return translators[key];
+    try {
+      const a = await Translator.availability({ sourceLanguage: from, targetLanguage: to });
+      if (a === 'unavailable') return (translators[key] = null);
+      return (translators[key] = await Translator.create({ sourceLanguage: from, targetLanguage: to }));
+    } catch (e) { return (translators[key] = null); }
+  }
+
+  async function translate(text) {
+    const tr = await getTranslator();
+    if (tr) return await tr.translate(text);
+    const url = 'https://api.mymemory.translated.net/get?q=' + encodeURIComponent(text.slice(0, 450)) +
+                '&langpair=' + from + '|' + to;
+    const r = await fetch(url);
+    const d = await r.json();
+    return d.responseData.translatedText;
+  }
+
+  function schedule(text) {
+    clearTimeout(timer);
+    timer = setTimeout(async () => {
+      const my = ++seq;
+      try {
+        const res = await translate(text);
+        if (my === seq) { current = res; viewIdx = -1; out.textContent = res; out.scrollTop = out.scrollHeight; status('слушаю…'); }
+      } catch (e) { status('перевод не удался', true); }
+    }, 450);
+  }
+
+  function startRec() {
+    rec = new SR();
+    rec.lang = CODES[from];
+    rec.continuous = true;
+    rec.interimResults = true;
+    rec.onresult = (ev) => {
+      const now = Date.now();
+      if (finalBuf && now - lastTime > 5000) { finalBuf = ''; archive(); } // новая фраза после паузы
+      lastTime = now;
+      let interim = '';
+      for (let i = ev.resultIndex; i < ev.results.length; i++) {
+        const t = ev.results[i][0].transcript;
+        if (ev.results[i].isFinal) finalBuf += t + ' '; else interim += t;
+      }
+      const full = (finalBuf + interim).trim();
+      if (full) schedule(full);
+    };
+    rec.onerror = (e) => {
+      if (e.error === 'not-allowed' || e.error === 'service-not-allowed') {
+        status('микрофон запрещён — разрешите в браузере', true); stop();
+      } else if (e.error === 'audio-capture') { status('микрофон не найден', true); stop(); }
+      else if (e.error === 'network') status('нет сети для распознавания', true);
+    };
+    rec.onend = () => { if (listening) setTimeout(() => { try { rec.start(); } catch (e) {} }, 150); };
+    rec.start();
+  }
+
+  function start() {
+    if (!SR) return;
+    listening = true; dot.classList.add('on'); status('слушаю…');
+    getTranslator(); // прогрев (нужен жест пользователя)
+    startRec();
+  }
+  function stop() {
+    listening = false; dot.classList.remove('on'); status('удерживайте экран');
+    if (rec) { rec.onend = null; rec.stop(); }
+  }
+
+  function showPrev() {
+    if (viewIdx === -1) viewIdx = current ? hist.length - 1 : hist.length - 2;
+    else if (viewIdx > 0) viewIdx--;
+    if (viewIdx >= 0 && hist[viewIdx] !== undefined) out.textContent = hist[viewIdx];
+    else viewIdx = -1;
+  }
+  function newSentence() {
+    archive(); finalBuf = ''; viewIdx = -1; seq++; clearTimeout(timer);
+    out.textContent = '';
+    if (listening) {
+      status('новое предложение');
+      if (rec) { rec.onend = null; try { rec.abort(); } catch (e) {} }
+      startRec();
+      setTimeout(() => { if (listening) status('слушаю…'); }, 900);
+    } else start();
+  }
+
+  // Управление: 1 тап = новое предложение, 2 тапа = предыдущий перевод,
+  // удержание 0,6 с = микрофон вкл/выкл
+  let lastTap = 0, tapTimer = null, holdTimer = null, held = false;
+  document.body.addEventListener('contextmenu', (e) => e.preventDefault());
+  document.body.addEventListener('pointerdown', (e) => {
+    if (e.target === langBtn) return;
+    held = false;
+    clearTimeout(holdTimer);
+    holdTimer = setTimeout(() => {
+      held = true;
+      clearTimeout(tapTimer); lastTap = 0;
+      listening ? stop() : start();
+    }, 600);
+  });
+  document.body.addEventListener('pointerup', (e) => {
+    if (e.target === langBtn) return;
+    clearTimeout(holdTimer);
+    if (held) { held = false; return; }
+    const now = Date.now();
+    if (now - lastTap < 320) { clearTimeout(tapTimer); lastTap = 0; showPrev(); return; }
+    lastTap = now;
+    tapTimer = setTimeout(newSentence, 320);
+  });
+  document.body.addEventListener('pointercancel', () => { clearTimeout(holdTimer); held = false; });
+
+  langBtn.addEventListener('click', (e) => {
+    e.stopPropagation();
+    [from, to] = [to, from];
+    langBtn.textContent = from.toUpperCase() + ' → ' + to.toUpperCase();
+    archive(); finalBuf = ''; out.textContent = ''; seq++;
+    if (listening) { rec.onend = null; rec.stop(); startRec(); }
+  });
+})();
+</script>
+</body>
+</html>
