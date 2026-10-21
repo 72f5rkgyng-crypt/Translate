@@ -65,7 +65,7 @@
   const SAY = { ru: 'Говорите по-русски', es: 'Говорите по-испански' };
   let from = 'ru', to = 'es';
   let listening = false, rec = null;
-  let finalBuf = '', lastTime = 0, timer = null, seq = 0;
+  let finalBuf = '', lastTime = 0, timer = null, seq = 0, ignoreNext = false;
   let current = '', hist = [], viewIdx = -1;
   const translators = {};
 
@@ -127,7 +127,9 @@
     r.continuous = false;
     r.interimResults = true;
     r.maxAlternatives = 1;
+    r.onstart = () => { ignoreNext = false; };
     r.onresult = (ev) => {
+      if (ignoreNext) return;
       const now = Date.now();
       if (finalBuf && now - lastTime > 5000) { finalBuf = ''; archive(); }
       lastTime = now;
@@ -150,7 +152,7 @@
       if (!listening || rec !== r) return;
       setTimeout(() => {
         if (!listening || rec !== r) return;
-        try { r.start(); } catch (e) { startRec(); }
+        try { r.start(); } catch (e) { stop(); status('микрофон остановился — нажмите кнопку', true); }
       }, 200);
     };
     try { r.start(); } catch (e) { status('не удалось запустить микрофон', true); }
@@ -159,7 +161,12 @@
     const old = rec; rec = null;
     if (old) { old.onend = null; old.onerror = null; old.onresult = null; try { old.abort(); } catch (e) {} }
   }
-  function restartRec() { killRec(); setTimeout(() => { if (listening) startRec(); }, 300); }
+  // Мягкий перезапуск: тот же объект распознавания (iPhone не даёт создавать новый без касания).
+  // abort() обрывает текущую сессию, onend сам запускает следующую уже с чистого листа.
+  function restartRec() {
+    ignoreNext = true;
+    if (rec) { rec.lang = CODES[from]; try { rec.abort(); } catch (e) {} }
+  }
 
   function start() {
     if (!SR) return;
